@@ -1,10 +1,12 @@
-docker run --rm -it \
-  -v "$PWD":/work -w /work \
-  python:3.11-slim \
-  bash -lc "pip install -U platformio && pio run"
+#!/bin/env/bash
 
-docker run --rm -it \
-  --device=/dev/ttyACM0 \
-  -v "$PWD":/work -w /work \
-  python:3.11-slim \
-  bash -lc "pip install -U platformio && pio run -t upload"
+## Build
+pio run
+
+## Flash 
+
+cp .pio/build/nucleo_f446re/firmware.bin /media/kaeptn-egli/NOD_F446RE
+
+## Serial Terminal
+
+cu -l /dev/ttyACM0 -s 115200
