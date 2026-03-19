@@ -94,6 +94,7 @@ int main()
     const float Kp{4.0f};
     const float wheel_vel_max = 2.0f * M_PIf * motor_M2.getMaxPhysicalVelocity();
 
+    //int const angleThreshold = 0.218978;
     
     // States
     enum RobotState {
@@ -112,65 +113,42 @@ int main()
             switch (robot_state) {
                 case RobotState::INITIAL: {
                     enable_motors = 1;
+                    //printf("initial\n");
                     robot_state = RobotState::FORWARD;
-                    printf("initial\n");
                     break;
                 }
                 case RobotState::SLEEP: {
-                    printf("sleep\n");
-                    if (button_pressed % 2 == 0)
-                        robot_state = RobotState::FORWARD;
-                    if (button_pressed % 2 != 0)
-                        robot_state = RobotState::BACKWARD;
+                    //printf("sleep\n");
+                    enable_motors = 0;
                     break;
                 }
                 case RobotState::FORWARD: {
-                    // setpoints for the dc motors in rps
                     // only update sensor bar angle if an led is triggered
                     if (sensor_bar.isAnyLedActive()) {
                         angle = sensor_bar.getAvgAngleRad();
+                      if (fabs(sensor_bar.getMeanFourAvgBitsCenter() - 1.0f) < 1e-3) {
+                        robot_state = RobotState::SLEEP;
+                      }
                     } else {
-                        angle = 0.0f;  // kein Signal → geradeaus, nicht drehen
+                        angle = 1.0f;  // kein Signal → geradeaus, nicht drehen
                     }
 
-                    printf("angle: %f", angle);
-                   
                    // control algorithm for robot velocities
-                   Eigen::Vector2f robot_coord = {0.4f * wheel_vel_max * r_wheel,  // half of the max. forward velocity
-                                                  Kp * angle                    }; // simple proportional angle controller
+                   Eigen::Vector2f robot_coord = {0.32f * wheel_vel_max * r_wheel,  // half of the max. forward velocity
+                                                  Kp * -angle}; // simple proportional angle controller
 
                    // map robot velocities to wheel velocities in rad/sec
                    Eigen::Vector2f wheel_speed = Cwheel2robot.inverse() * robot_coord;
                     
                     motor_M1.setVelocity(wheel_speed(0) / (2.0f * M_PIf)); // set a desired speed for speed controlled dc motors M1
-                    printf("RUN:\n");
-                    printf("angle: %f | w0: %f | w1: %f\n", 
-                        angle, 
-                        wheel_speed(0) / (2.0f * M_PIf), 
-                        wheel_speed(1) / (2.0f * M_PIf));
-                    //printf("M1 max velocity: %f \n", motor_M1.getMaxVelocity());
-                    //printf("M1 max physical velocity: %f \n", motor_M1.getMaxPhysicalVelocity());
-                    //printf("wheel_speed 0 %f :", wheel_speed(0));
-                    //printf("M1 speed 0 %f \n:", wheel_speed(0) / (2.0f * M_PIf));
-                    //printf("M1 velocity: %f \n", motor_M1.getVelocity());
                     motor_M2.setVelocity(-wheel_speed(1) / (2.0f * M_PIf)); // set a desired speed for speed controlled dc motors M2
-                    //printf("M2 max velocity: %f \n", motor_M2.getMaxVelocity());
-                    //printf("M2 max physical velocity: %f \n", motor_M2.getMaxPhysicalVelocity());
-                    //printf("wheel_speed 1 %f :", wheel_speed(1));
-                    //printf("M2 speed 1 %f \n:", wheel_speed(1) / (2.0f * M_PIf));
-                    //printf("M2 velocity: %f \n", motor_M2.getVelocity());
-                    printf("forward\n");
-                    //robot_state = RobotState::SLEEP;
+                    
+                    //printf("Forward\n");
+                    //printf("angle: %f | w0: %f | w1: %f\n", angle, wheel_speed(0) / (2.0f * M_PIf), wheel_speed(1) / (2.0f * M_PIf));
                     break;
                 }
                 case RobotState::BACKWARD: {
-                    // move backwards to the initial position
-                    // and go to the SLEEP state if reached
-                    //motor_M3.setRotation(-3.0f);
-                    // switching condition is slightly bigger for robustness
-                    printf("backward\n");
-                    //if (motor_M3.getRotation() < -2.89f)
-                    //    robot_state = RobotState::SLEEP;
+                    //printf("backward\n");
                     break;
                 }
                 default: {
