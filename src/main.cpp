@@ -1,6 +1,4 @@
 #include "mbed.h"
-
-// pes board pin map
 #include "PESBoardPinMap.h"
 
 // drivers
@@ -9,6 +7,7 @@
 #include "FastPWM.h"
 #include <Eigen/Dense>
 #include "SensorBar.h"
+#include "ColorSensor.h"
 
 #define M_PIf 3.14159265358979323846f // pi
 
@@ -29,6 +28,8 @@ int main()
                                         // the main task will run 50 times per second
     Timer main_task_timer;              // create Timer object which we use to run the main task
                                         // every main_task_period_ms
+
+    Timer pickup_timer;
 
     // start timer
     main_task_timer.start();
@@ -52,7 +53,7 @@ int main()
     
     const float r_wheel = 0.057f / 2.0f; // wheel radius in meters
     const float b_wheel = 0.19f;          // wheelbase, distance from wheel to wheel in meters
-    const float max_speed_percentage{0.30f}; // is uesd to set the actual max speed
+    const float max_speed_percentage{0.25f}; // is uesd to set the actual max speed
 
     // transforms wheel to robot velocities
     Eigen::Matrix2f Cwheel2robot;
@@ -73,8 +74,26 @@ int main()
     const float Kp{4.0f};
     const float wheel_vel_max = 2.0f * M_PIf * motor_M2.getMaxPhysicalVelocity();
 
-    //int const angleThreshold = 0.218978;
-    
+    // Color Sensor
+
+    ColorSensor color_sensor(PB_3); // alle Pins auf Arduino-Header, LED floating
+
+    int color{0};
+
+    enum Color {
+    UNKNOWN = 0,
+    BLACK   = 1,
+    WHITE   = 2,
+    RED     = 3,
+    YELLOW  = 4,
+    GREEN   = 5,
+    CYAN    = 6,
+    BLUE    = 7,
+    MAGENTA = 8
+    };
+
+    int sleep_count = 0;
+
     // States
     enum RobotState {
         INITIAL,
@@ -108,7 +127,7 @@ int main()
                     if (sensor_bar.isAnyLedActive()) {
                         angle = sensor_bar.getAvgAngleRad();
                       if (fabs(sensor_bar.getMeanFourAvgBitsCenter() - max_mean_center_four) < epsilon) {
-                        robot_state = RobotState::SLEEP;
+                        robot_state = RobotState::COLOR_SCAN;
                       }
                     } else {
                         angle = default_turning_angle;  // no line read -> positiv rotation
@@ -124,15 +143,53 @@ int main()
                     motor_M1.setVelocity(wheel_speed(0) / (2.0f * M_PIf)); // set a desired speed for speed controlled dc motors M1
                     motor_M2.setVelocity(-wheel_speed(1) / (2.0f * M_PIf)); // set a desired speed for speed controlled dc motors M2
                     
-                    printf("angle: %f | w0: %f | w1: %f\n", angle, wheel_speed(0) / (2.0f * M_PIf), wheel_speed(1) / (2.0f * M_PIf));
+                    //printf("angle: %f | w0: %f | w1: %f\n", angle, wheel_speed(0) / (2.0f * M_PIf), wheel_speed(1) / (2.0f * M_PIf));
                     break;
                 }
                 case RobotState::COLOR_SCAN: {
-                    //printf("backward\n");
+                    color_sensor.switchLed(ON);
+    
+                    int detected = color_sensor.getColor();
+                    
+                    if (detected == YELLOW ||
+                        detected == GREEN  ||
+                        detected == RED    ||
+                        detected == BLUE) {
+                        // Farbe gefunden
+                        color = detected;
+                        detected = 0;
+                        printf("Color: %s\n", ColorSensor::getColorString(color));
+                        color_sensor.switchLed(OFF);
+                        robot_state = RobotState::PICKUP_PARCEL;
+                    } else {
+                        // noch keine Farbe -> weiterfahren
+                        Eigen::Vector2f robot_coord = {0.1f * wheel_vel_max * r_wheel, 0.0f};
+                        Eigen::Vector2f wheel_speed = Cwheel2robot.inverse() * robot_coord;
+                        motor_M1.setVelocity( wheel_speed(0) / (2.0f * M_PIf));
+                        motor_M2.setVelocity(-wheel_speed(1) / (2.0f * M_PIf));
+                    }
                     break;
                 }
                 case RobotState::PICKUP_PARCEL: {
-                    //printf("backward\n");
+                    // Motoren stoppen
+                    motor_M1.setVelocity(0.0f);
+                    motor_M2.setVelocity(0.0f);
+                    user_led = 1;
+                    
+                    // Timer beim ersten Mal starten
+                    static bool timer_started = false;
+                    if (!timer_started) {
+                        timer_started = true;
+                        pickup_timer.start();
+                    }
+                    
+                    // nach 5 Sekunden weiter
+                    if (duration_cast<milliseconds>(pickup_timer.elapsed_time()).count() >= 5000) {
+                        timer_started = false;
+                        pickup_timer.stop();
+                        pickup_timer.reset();
+                        robot_state = RobotState::FORWARD;
+                    }
                     break;
                 }
                 case RobotState::DROP_PARCEL: {
@@ -157,7 +214,7 @@ int main()
         }
 
         // toggling the user led
-        user_led = !user_led;
+        //user_led = !user_led;
 
         // --- code that runs every cycle at the end goes here ---
 
