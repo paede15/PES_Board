@@ -20,6 +20,8 @@ void toggle_do_execute_main_fcn(); // custom function which is getting executed 
 
 // sensor thread detection
 volatile bool cross_detected = false;
+volatile bool color_detected = false;
+volatile int cross_bar_count{0};
 SensorBar* sensor_bar_ptr = nullptr;
 void detect_cross_thread();
 
@@ -57,8 +59,8 @@ int main()
     // Differential Drive Robot Kinematics
     
     const float r_wheel = 0.057f / 2.0f; // wheel radius in meters
-    const float b_wheel = 0.19f;          // wheelbase, distance from wheel to wheel in meters
-    const float max_speed_percentage{0.6f}; // is used to set the actual max speed
+    const float b_wheel = 0.18f;          // wheelbase, distance from wheel to wheel in meters
+    const float max_speed_percentage{0.9f}; // is used to set the actual max speed
 
     // transforms wheel to robot velocities
     Eigen::Matrix2f Cwheel2robot;
@@ -68,7 +70,7 @@ int main()
     // Line Array Sensor
 
     // sensor bar
-    const float bar_dist = 0.074f; // distance from wheel axis to leds on sensor bar / array in meters
+    const float bar_dist = 0.18f; // distance from wheel axis to leds on sensor bar / array in meters
     SensorBar sensor_bar(PB_9, PB_8, bar_dist);
 
     // angle measured from sensor bar (black line) relative to robot
@@ -76,8 +78,8 @@ int main()
     const float default_turning_angle(1.0f); // this is the default trurning angle if the linereader read nothing.
 
     // rotational velocity controller (PD)
-    const float Kp{4.7f};
-    const float Kd{0.25f};
+    const float Kp{21.0f};
+    const float Kd{0.35f};
     const float dt = main_task_period_ms * 1e-3f; // 0.020 s
     float prev_error{0.0f};
     const float wheel_vel_max = 2.0f * M_PIf * motor_M2.getMaxPhysicalVelocity();
@@ -109,7 +111,8 @@ int main()
         FORWARD,
         COLOR_SCAN,
         PICKUP_PARCEL,
-        DROP_PARCEL
+        DROP_PARCEL,
+        CALIBRATE_COLOR
     } robot_state = RobotState::INITIAL;
 
    sensor_bar_ptr = &sensor_bar;
@@ -124,6 +127,8 @@ int main()
             switch (robot_state) {
                 case RobotState::INITIAL: {
                     enable_motors = 1;
+                    cross_detected = false;
+                    cross_bar_count = 0;
                     robot_state = RobotState::FORWARD;
                     break;
                 }
@@ -134,7 +139,7 @@ int main()
                 case RobotState::FORWARD: {
                     if (sensor_bar.isAnyLedActive()) {
                         angle = sensor_bar.getAvgAngleRad();
-                        if (cross_detected) {
+                        if (cross_detected && !color_detected) {
                             prev_error = 0.0f; // reset derivative on state change
                             robot_state = RobotState::COLOR_SCAN;
                             break;
@@ -144,6 +149,7 @@ int main()
                     }
 
                     // PD controller for rotational velocity
+                    color_detected = false;
                     float derivative = (angle - prev_error) / dt;
                     float omega      = -(Kp * angle + Kd * derivative);
                     prev_error       = angle;
@@ -152,10 +158,10 @@ int main()
                     Eigen::Vector2f robot_coord = {max_speed_percentage * wheel_vel_max * r_wheel, omega};
                     Eigen::Vector2f wheel_speed = Cwheel2robot.inverse() * robot_coord;
 
-                    motor_M1.setVelocity( wheel_speed(0) / (2.0f * M_PIf));
+                    motor_M1.setVelocity(wheel_speed(0) / (2.0f * M_PIf));
                     motor_M2.setVelocity(-wheel_speed(1) / (2.0f * M_PIf));
 
-                    //printf("angle: %f | omega: %f\n", angle, omega);
+                    printf("angle: %f | omega: %f\n | lin_speed: %f\n", angle, omega, max_speed_percentage * wheel_vel_max * r_wheel);
                     break;
                 }
                 case RobotState::COLOR_SCAN: {
@@ -168,6 +174,7 @@ int main()
                         detected == RED    ||
                         detected == BLUE) {
                         // Farbe gefunden
+                        color_detected = true;
                         color = detected;
                         detected = 0;
                         printf("Color: %s\n", ColorSensor::getColorString(color));
@@ -177,8 +184,8 @@ int main()
                         // noch keine Farbe -> weiterfahren
                         Eigen::Vector2f robot_coord = {0.1f * wheel_vel_max * r_wheel, 0.0f};
                         Eigen::Vector2f wheel_speed = Cwheel2robot.inverse() * robot_coord;
-                        motor_M1.setVelocity( wheel_speed(0) / (2.0f * M_PIf));
-                        motor_M2.setVelocity(-wheel_speed(1) / (2.0f * M_PIf));
+                        motor_M1.setVelocity(-wheel_speed(0) / (2.0f * M_PIf));
+                        motor_M2.setVelocity(wheel_speed(1) / (2.0f * M_PIf));
                     }
                     break;
                 }
@@ -196,7 +203,7 @@ int main()
                     }
                     
                     // nach 5 Sekunden weiter
-                    if (duration_cast<milliseconds>(pickup_timer.elapsed_time()).count() >= 5000) {
+                    if (duration_cast<milliseconds>(pickup_timer.elapsed_time()).count() >= 1000) {
                         timer_started = false;
                         pickup_timer.stop();
                         pickup_timer.reset();
@@ -209,6 +216,12 @@ int main()
                     //printf("backward\n");
                     break;
                 }
+                case RobotState::CALIBRATE_COLOR: {
+                    color_sensor.switchLed(ON);
+                    const float* colors = color_sensor.readColor();
+                    printf("R: %.2f\t G: %.2f\t B: %.2f\t C: %.2f\n", colors[0], colors[1], colors[2], colors[3]);
+                    break;
+                } 
                 default: {
 
                     break; // do nothing
@@ -250,11 +263,25 @@ void toggle_do_execute_main_fcn()
 }
 
 void detect_cross_thread() {
+    bool prev_full_line = false;
     while (true) {
         uint8_t raw = sensor_bar_ptr->getRaw();
+        bool full_line = (raw == 0xff);
+
         if (raw == 0x3c) {
             cross_detected = true;
         }
+
+        // only count on rising edge to avoid false triggers when stopped on line
+        if (full_line && !prev_full_line) {
+            if (cross_bar_count == 0) {
+                cross_bar_count++;  // first crossing = getting on track, skip
+            } else {
+                cross_detected = true;  // second crossing = real crossbar
+            }
+        }
+
+        prev_full_line = full_line;
         ThisThread::sleep_for(4ms); // gleich schnell wie SensorBar intern
     }
 }
