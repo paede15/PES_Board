@@ -22,6 +22,7 @@ void toggle_do_execute_main_fcn(); // custom function which is getting executed 
 volatile bool cross_detected = false;
 volatile bool color_detected = false;
 volatile int cross_bar_count{0};
+volatile int cross_lock_ticks = 0;
 SensorBar* sensor_bar_ptr = nullptr;
 void detect_cross_thread();
 
@@ -58,9 +59,9 @@ int main()
 
     // Differential Drive Robot Kinematics
     
-    const float r_wheel = 0.057f / 2.0f; // wheel radius in meters
-    const float b_wheel = 0.18f;          // wheelbase, distance from wheel to wheel in meters
-    const float max_speed_percentage{0.9f}; // is used to set the actual max speed
+    const float r_wheel = 0.0305f / 2.0f; // wheel radius in meters
+    const float b_wheel = 0.1408f;          // wheelbase, distance from wheel to wheel in meters
+    const float max_speed_percentage{1.0f}; // is used to set the actual max speed
 
     // transforms wheel to robot velocities
     Eigen::Matrix2f Cwheel2robot;
@@ -208,6 +209,7 @@ int main()
                         pickup_timer.stop();
                         pickup_timer.reset();
                         cross_detected = false;
+                        cross_lock_ticks = 125; // 125 * 4ms = 500ms lockout
                         robot_state = RobotState::FORWARD;
                     }
                     break;
@@ -264,24 +266,32 @@ void toggle_do_execute_main_fcn()
 
 void detect_cross_thread() {
     bool prev_full_line = false;
+    bool prev_cross_line = false;
     while (true) {
         uint8_t raw = sensor_bar_ptr->getRaw();
-        bool full_line = (raw == 0xff);
+        bool full_line  = (raw == 0xff);
+        bool cross_line = (raw == 0x3c);
 
-        if (raw == 0x3c) {
-            cross_detected = true;
-        }
+        if (cross_lock_ticks > 0) cross_lock_ticks--;
 
-        // only count on rising edge to avoid false triggers when stopped on line
-        if (full_line && !prev_full_line) {
-            if (cross_bar_count == 0) {
-                cross_bar_count++;  // first crossing = getting on track, skip
-            } else {
-                cross_detected = true;  // second crossing = real crossbar
+        if (!cross_detected && cross_lock_ticks == 0) {
+            // rising edge on center-only pattern
+            if (cross_line && !prev_cross_line) {
+                cross_detected = true;
+            }
+
+            // rising edge on full bar (original logic, skip first)
+            if (full_line && !prev_full_line) {
+                if (cross_bar_count == 0) {
+                    cross_bar_count++;
+                } else {
+                    cross_detected = true;
+                }
             }
         }
 
-        prev_full_line = full_line;
-        ThisThread::sleep_for(4ms); // gleich schnell wie SensorBar intern
+        prev_full_line  = full_line;
+        prev_cross_line = cross_line;
+        ThisThread::sleep_for(4ms);
     }
 }
