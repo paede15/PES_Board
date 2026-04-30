@@ -74,6 +74,11 @@ bool Servo::isEnabled() const
     return m_enabled;
 }
 
+float Servo::getPulseWidth()
+{
+    return (static_cast<float>(m_Motion.getPosition()) - m_pulse_min) / (m_pulse_max - m_pulse_min);
+}
+
 float Servo::calculateNormalisedPulseWidth(float pulse)
 {
     // it is assumed that after the calibration m_pulse_min != 0.0f and if so

@@ -108,6 +108,13 @@ public:
      */
     bool isEnabled() const;
 
+    /**
+     * @brief Get the current normalised pulse width (profiled position).
+     *
+     * @return float Current pulse width in calibrated 0–1 space.
+     */
+    float getPulseWidth();
+
 private:
     static constexpr int64_t PERIOD_MUS = 20000;
     static constexpr float TS = 1.0e-6f * static_cast<float>(PERIOD_MUS);

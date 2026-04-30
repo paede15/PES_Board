@@ -8,6 +8,8 @@
 #include <Eigen/Dense>
 #include "SensorBar.h"
 #include "ColorSensor.h"
+#include "Servo.h"
+//#include "IIRFilter.h"
 
 #define M_PIf 3.14159265358979323846f // pi
 
@@ -19,7 +21,8 @@ DebounceIn user_button(BUTTON1);   // create DebounceIn to evaluate the user but
 void toggle_do_execute_main_fcn(); // custom function which is getting executed when user
 
 // sensor thread detection
-volatile bool cross_detected = false;
+volatile bool pickup_cross  = false;
+volatile bool drop_cross    = false;
 volatile bool color_detected = false;
 volatile int cross_bar_count{0};
 volatile int cross_lock_ticks = 0;
@@ -36,8 +39,6 @@ int main()
                                         // the main task will run 50 times per second
     Timer main_task_timer;              // create Timer object which we use to run the main task
                                         // every main_task_period_ms
-
-    Timer pickup_timer;
 
     // start timer
     main_task_timer.start();
@@ -56,6 +57,25 @@ int main()
     // motor M1 and M2, do NOT enable motion planner when used with the LineFollower (disabled per default)
     DCMotor motor_M1(PB_PWM_M1, PB_ENC_A_M1, PB_ENC_B_M1, gear_ratio, kn, voltage_max);
     DCMotor motor_M2(PB_PWM_M2, PB_ENC_A_M2, PB_ENC_B_M2, gear_ratio, kn, voltage_max);
+    DCMotor motor_M3(PB_PWM_M3, PB_ENC_A_M3, PB_ENC_B_M3, gear_ratio, kn, voltage_max);
+
+    // Motion-PLanner for M3 position controll
+    motor_M3.enableMotionPlanner();
+    motor_M3.setMaxVelocity(motor_M3.getMaxPhysicalVelocity() * 0.75f);
+
+    // servo (min/max pulse widths from calibration)
+    Servo servo_D0(PB_D0, 0.03f, 0.125f);
+    Servo servo_D1(PB_D1, 0.03f, 0.1f);
+
+    // default acceleration of the servo motion profile is 1.0e6f
+    servo_D0.setMaxAcceleration(0.3f);
+    servo_D1.setMaxAcceleration(0.3f);
+
+
+    // servo calibration variables
+    float servo_input = 0.0f;
+    int servo_counter = 0;
+    const int loops_per_seconds = static_cast<int>(ceilf(1.0f / (0.001f * static_cast<float>(main_task_period_ms))));
 
     // Differential Drive Robot Kinematics
     
@@ -79,17 +99,21 @@ int main()
     const float default_turning_angle(1.0f); // this is the default trurning angle if the linereader read nothing.
 
     // rotational velocity controller (PD)
-    const float Kp{21.0f};
-    const float Kd{0.35f};
+    const float Kp{10.5f};
+    const float Kd{0.8f};
     const float dt = main_task_period_ms * 1e-3f; // 0.020 s
     float prev_error{0.0f};
+    //IIRFilter angle_filter;
+    //angle_filter.lowPass1Init(5.0f, dt); //low pass filter 5Hz to reduce Sesnor noise.
     const float wheel_vel_max = 2.0f * M_PIf * motor_M2.getMaxPhysicalVelocity();
 
     // Color Sensor
 
     ColorSensor color_sensor(PB_3); // alle Pins auf Arduino-Header, LED floating
 
-    int color{0};
+    int  current_color_run{0};
+    bool color_done[9] = {};
+    int  pickups_done  = 0;
 
     enum Color {
     UNKNOWN = 0,
@@ -111,14 +135,41 @@ int main()
         SLEEP,
         FORWARD,
         COLOR_SCAN,
-        PICKUP_PARCEL,
-        DROP_PARCEL,
-        CALIBRATE_COLOR
+        HANDLE_PARCEL,
+        CALIBRATE_COLOR,
+        CALIBRATE_SERVO
     } robot_state = RobotState::INITIAL;
 
    sensor_bar_ptr = &sensor_bar;
    Thread cross_thread;
-   cross_thread.start(detect_cross_thread);    
+   cross_thread.start(detect_cross_thread);
+
+    bool is_pickup = true;
+
+    // controll parameters for crane: m3_dc_offset, srv_d0_offset, srv_d1_offset
+    struct ParcelParams { float m3_offset, srv_out_d0, srv_out_d1; };
+    const ParcelParams pickup_params[9] = {
+        {},                            // UNKNOWN
+        {},                            // BLACK
+        {},                            // WHITE
+        { 0.5f, 0.8f, 0.2f },         // RED
+        { 0.5f, 0.8f, 0.2f },         // YELLOW
+        {-0.5f, 0.8f, 0.2f },         // GREEN
+        {},                            // CYAN
+        {-0.2f, 1.0f, 0.05f},         // BLUE
+        {},                            // MAGENTA
+    };
+    const ParcelParams drop_params[9] = {
+        {},
+        {},
+        {},
+        { 0.5f, 0.8f, 0.2f },         // RED
+        { 0.5f, 0.8f, 0.2f },         // YELLOW
+        {-0.5f, 0.8f, 0.2f },         // GREEN
+        {},
+        {-0.5f, 1.0f, 0.1f },         // BLUE
+        {},
+    };
 
     while (true) {
         main_task_timer.reset();
@@ -128,9 +179,17 @@ int main()
             switch (robot_state) {
                 case RobotState::INITIAL: {
                     enable_motors = 1;
-                    cross_detected = false;
+                    pickup_cross  = false;
+                    drop_cross    = false;
                     cross_bar_count = 0;
-                    robot_state = RobotState::FORWARD;
+                    if (!servo_D0.isEnabled()) servo_D0.enable();
+                    if (!servo_D1.isEnabled()) servo_D1.enable();
+                    servo_D0.setPulseWidth(0.8f);
+                    servo_D1.setPulseWidth(0.6f);
+                    if (fabsf(servo_D0.getPulseWidth() - 0.8f) < 0.02f &&
+                        fabsf(servo_D1.getPulseWidth() - 0.6f) < 0.02f) {
+                        robot_state = (pickups_done >= 4) ? RobotState::SLEEP : RobotState::FORWARD;
+                    }
                     break;
                 }
                 case RobotState::SLEEP: {
@@ -139,9 +198,15 @@ int main()
                 }
                 case RobotState::FORWARD: {
                     if (sensor_bar.isAnyLedActive()) {
-                        angle = sensor_bar.getAvgAngleRad();
-                        if (cross_detected && !color_detected) {
-                            prev_error = 0.0f; // reset derivative on state change
+                        uint8_t raw = sensor_bar.getRaw();
+                        if ((raw & 0xc7) == 0xc7) {
+                            angle = 0.0f; // both outer LEDs active → perpendicular entry line
+                        } else {
+                            //angle = angle_filter.apply(sensor_bar.getAvgAngleRad());
+                            angle = sensor_bar.getAvgAngleRad();
+                        }
+                        if ((pickup_cross || drop_cross) && !color_detected) {
+                            prev_error = 0.0f;
                             robot_state = RobotState::COLOR_SCAN;
                             break;
                         }
@@ -155,17 +220,24 @@ int main()
                     float omega      = -(Kp * angle + Kd * derivative);
                     prev_error       = angle;
 
+                    // slow down on sharp turns, speed up on straights                                                                                                      
+                    //float speed_factor = 1.0f - fabsf(angle) / default_turning_angle;                                                                                     
+                    //speed_factor = (speed_factor < 0.3f) ? 0.3f : speed_factor;
+
                     // map robot velocities to wheel velocities in rad/sec
                     Eigen::Vector2f robot_coord = {max_speed_percentage * wheel_vel_max * r_wheel, omega};
+                    //Eigen::Vector2f robot_coord = {speed_factor * max_speed_percentage * wheel_vel_max * r_wheel, omega};
                     Eigen::Vector2f wheel_speed = Cwheel2robot.inverse() * robot_coord;
 
                     motor_M1.setVelocity(wheel_speed(0) / (2.0f * M_PIf));
                     motor_M2.setVelocity(-wheel_speed(1) / (2.0f * M_PIf));
 
-                    printf("angle: %f | omega: %f\n | lin_speed: %f\n", angle, omega, max_speed_percentage * wheel_vel_max * r_wheel);
+                    //printf("angle: %f | omega: %f\n | lin_speed: %f\n", angle, omega, max_speed_percentage * wheel_vel_max * r_wheel);
                     break;
                 }
                 case RobotState::COLOR_SCAN: {
+                    motor_M1.setVelocity(0.0f);
+                    motor_M2.setVelocity(0.0f);
                     color_sensor.switchLed(ON);
     
                     int detected = color_sensor.getColor();
@@ -174,48 +246,82 @@ int main()
                         detected == GREEN  ||
                         detected == RED    ||
                         detected == BLUE) {
-                        // Farbe gefunden
-                        color_detected = true;
-                        color = detected;
-                        detected = 0;
-                        printf("Color: %s\n", ColorSensor::getColorString(color));
                         color_sensor.switchLed(OFF);
-                        robot_state = RobotState::PICKUP_PARCEL;
-                    } else {
-                        // noch keine Farbe -> weiterfahren
-                        Eigen::Vector2f robot_coord = {0.1f * wheel_vel_max * r_wheel, 0.0f};
-                        Eigen::Vector2f wheel_speed = Cwheel2robot.inverse() * robot_coord;
-                        motor_M1.setVelocity(-wheel_speed(0) / (2.0f * M_PIf));
-                        motor_M2.setVelocity(wheel_speed(1) / (2.0f * M_PIf));
+                        if (!color_done[detected] && pickup_cross && current_color_run == 0) {
+                            color_done[detected] = true;
+                            current_color_run = detected;
+                            color_detected = true;
+                            //printf("Color: %s\n", ColorSensor::getColorString(current_color_run));
+                            is_pickup   = true;
+                            robot_state = RobotState::HANDLE_PARCEL;
+                        } else if (current_color_run == detected){
+                            // already picked — this is the drop-off spot
+                            drop_cross  = false;
+                            pickup_cross = false;
+                            is_pickup   = false;
+                            robot_state = RobotState::HANDLE_PARCEL;
+                        } else {
+                            drop_cross  = false;
+                            pickup_cross = false;
+                            robot_state = RobotState::FORWARD;
+                        }
                     }
                     break;
                 }
-                case RobotState::PICKUP_PARCEL: {
-                    // Motoren stoppen
+                case RobotState::HANDLE_PARCEL: {
                     motor_M1.setVelocity(0.0f);
                     motor_M2.setVelocity(0.0f);
                     user_led = 1;
-                    
-                    // Timer beim ersten Mal starten
-                    static bool timer_started = false;
-                    if (!timer_started) {
-                        timer_started = true;
-                        pickup_timer.start();
+
+                    static enum class HandleStep { MOVE_OUT, MOVE_BACK } step = HandleStep::MOVE_OUT;
+                    static float m3_target   = 0.0f;
+                    static bool  move_issued = false;
+
+                    const ParcelParams& p = is_pickup ? pickup_params[current_color_run]
+                                                      : drop_params[current_color_run];
+
+                    switch (step) {
+                        case HandleStep::MOVE_OUT: {
+                            if (!move_issued) {
+                                move_issued = true;
+                                m3_target   = motor_M3.getRotation() + p.m3_offset;
+                                if (!servo_D0.isEnabled()) servo_D0.enable();
+                                if (!servo_D1.isEnabled()) servo_D1.enable();
+                                servo_D0.setPulseWidth(p.srv_out_d0);
+                                servo_D1.setPulseWidth(p.srv_out_d1);
+                                motor_M3.setRotation(m3_target);
+                            }
+                            if (fabsf(motor_M3.getRotation() - m3_target) < 0.05f &&
+                                fabsf(servo_D0.getPulseWidth() - p.srv_out_d0) < 0.02f &&
+                                fabsf(servo_D1.getPulseWidth() - p.srv_out_d1) < 0.02f) {
+                                step        = HandleStep::MOVE_BACK;
+                                move_issued = false;
+                            }
+                            break;
+                        }
+                        case HandleStep::MOVE_BACK: {
+                            if (!move_issued) {
+                                move_issued = true;
+                                m3_target   = motor_M3.getRotation() - p.m3_offset;
+                                servo_D0.setPulseWidth(0.8f);
+                                servo_D1.setPulseWidth(0.6f);
+                                motor_M3.setRotation(m3_target);
+                            }
+                            if (fabsf(motor_M3.getRotation() - m3_target) < 0.05f &&
+                                fabsf(servo_D0.getPulseWidth() - 0.8f) < 0.02f &&
+                                fabsf(servo_D1.getPulseWidth() - 0.6f) < 0.02f) {
+                                step             = HandleStep::MOVE_OUT;
+                                move_issued      = false;
+                                pickup_cross     = false;
+                                drop_cross       = false;
+                                cross_lock_ticks = 125;
+                                pickups_done++;
+                                if (!is_pickup) current_color_run = 0;
+                                robot_state = RobotState::INITIAL;
+                            }
+                            break;
+                        }
                     }
-                    
-                    // nach 5 Sekunden weiter
-                    if (duration_cast<milliseconds>(pickup_timer.elapsed_time()).count() >= 1000) {
-                        timer_started = false;
-                        pickup_timer.stop();
-                        pickup_timer.reset();
-                        cross_detected = false;
-                        cross_lock_ticks = 125; // 125 * 4ms = 500ms lockout
-                        robot_state = RobotState::FORWARD;
-                    }
-                    break;
-                }
-                case RobotState::DROP_PARCEL: {
-                    //printf("backward\n");
                     break;
                 }
                 case RobotState::CALIBRATE_COLOR: {
@@ -223,7 +329,25 @@ int main()
                     const float* colors = color_sensor.readColor();
                     printf("R: %.2f\t G: %.2f\t B: %.2f\t C: %.2f\n", colors[0], colors[1], colors[2], colors[3]);
                     break;
-                } 
+                }
+                case RobotState::CALIBRATE_SERVO: {
+                    if (!servo_D0.isEnabled())
+                        servo_D0.enable();
+                    if (!servo_D1.isEnabled())
+                        servo_D1.enable();
+
+                    //servo_D0.setPulseWidth(servo_input);
+                    servo_D1.setPulseWidth(servo_input);
+
+                    if ((servo_input < 1.0f) &&
+                        (servo_counter % loops_per_seconds == 0) &&
+                        (servo_counter != 0))
+                        servo_input += 0.005f;
+                    servo_counter++;
+
+                    printf("Pulse width: %f\n", servo_input);
+                    break;
+                }
                 default: {
 
                     break; // do nothing
@@ -237,7 +361,11 @@ int main()
 
                 // --- variables and objects that should be reset go here ---
 
-                // reset variables and objects
+                // reset servo calibration
+                servo_D0.disable();
+                servo_D1.disable();
+                servo_input = 0.0f;
+                servo_counter = 0;
             }
         }
 
@@ -274,19 +402,16 @@ void detect_cross_thread() {
 
         if (cross_lock_ticks > 0) cross_lock_ticks--;
 
-        if (!cross_detected && cross_lock_ticks == 0) {
-            // rising edge on center-only pattern
-            if (cross_line && !prev_cross_line) {
-                cross_detected = true;
-            }
+        if (cross_lock_ticks == 0) {
+            // rising edge on center-only pattern → drop
+            if (!drop_cross && cross_line && !prev_cross_line)
+                drop_cross = true;
 
-            // rising edge on full bar (original logic, skip first)
-            if (full_line && !prev_full_line) {
-                if (cross_bar_count == 0) {
-                    cross_bar_count++;
-                } else {
-                    cross_detected = true;
-                }
+            // rising edge on full bar → pickup (skip first)
+            if (!pickup_cross && full_line && !prev_full_line) {
+                // corss_bar_count skips the first cross_line to get on the track
+                if (cross_bar_count == 0) cross_bar_count++;
+                else pickup_cross = true;
             }
         }
 
