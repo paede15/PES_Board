@@ -50,7 +50,7 @@ int main()
 
     DigitalOut enable_motors(PB_ENABLE_DCMOTORS); // create object to enable power electronics for the dc motors
     
-    const float voltage_max = 12.0f; // maximum voltage of battery packs, adjust this to - 6.0f V if you only use one battery pack
+    const float voltage_max = 11.0f; // maximum voltage of battery packs, adjust this to - 6.0f V if you only use one battery pack
     const float gear_ratio = 100.00f;
     const float kn = 140.0f / 12.0f;
 
@@ -71,7 +71,6 @@ int main()
     servo_D0.setMaxAcceleration(0.3f);
     servo_D1.setMaxAcceleration(0.3f);
 
-
     // servo calibration variables
     float servo_input = 0.0f;
     int servo_counter = 0;
@@ -79,7 +78,7 @@ int main()
 
     // Differential Drive Robot Kinematics
     
-    const float r_wheel = 0.0305f / 2.0f; // wheel radius in meters
+    const float r_wheel = 0.03f / 2.0f; // wheel radius in meters
     const float b_wheel = 0.1408f;          // wheelbase, distance from wheel to wheel in meters
     const float max_speed_percentage{1.0f}; // is used to set the actual max speed
 
@@ -99,8 +98,8 @@ int main()
     const float default_turning_angle(1.0f); // this is the default trurning angle if the linereader read nothing.
 
     // rotational velocity controller (PD)
-    const float Kp{10.5f};
-    const float Kd{0.8f};
+    const float Kp{9.5f};
+    const float Kd{0.25f};
     const float dt = main_task_period_ms * 1e-3f; // 0.020 s
     float prev_error{0.0f};
     //IIRFilter angle_filter;
@@ -146,6 +145,7 @@ int main()
 
     bool is_pickup = true;
 
+    // Crane_Controll.
     // controll parameters for crane: m3_dc_offset, srv_d0_offset, srv_d1_offset
     struct ParcelParams { float m3_offset, srv_out_d0, srv_out_d1; };
     const ParcelParams pickup_params[9] = {
@@ -216,9 +216,18 @@ int main()
 
                     // PD controller for rotational velocity
                     color_detected = false;
+                    const float angle_threshold = -0.3;
+                    const float derivative_threshold = Kd * angle_threshold; // Kd * -0.3
+                    const float derivative_correction_factor = 16.0f;
                     float derivative = (angle - prev_error) / dt;
                     float omega      = -(Kp * angle + Kd * derivative);
                     prev_error       = angle;
+
+                    //if (Kd * derivative < derivative_threshold) {
+                    //    omega *= derivative_correction_factor;
+                    //    printf("omega: %f, angle: %f, Kd, %f, derivative %f\n", omega, angle, Kd, derivative);
+                    //}
+
 
                     // slow down on sharp turns, speed up on straights                                                                                                      
                     //float speed_factor = 1.0f - fabsf(angle) / default_turning_angle;                                                                                     
@@ -253,13 +262,15 @@ int main()
                             color_detected = true;
                             //printf("Color: %s\n", ColorSensor::getColorString(current_color_run));
                             is_pickup   = true;
-                            robot_state = RobotState::HANDLE_PARCEL;
+                            //robot_state = RobotState::HANDLE_PARCEL;
+                            robot_state = RobotState::FORWARD;
                         } else if (current_color_run == detected){
                             // already picked — this is the drop-off spot
                             drop_cross  = false;
                             pickup_cross = false;
                             is_pickup   = false;
-                            robot_state = RobotState::HANDLE_PARCEL;
+                            //robot_state = RobotState::HANDLE_PARCEL;
+                            robot_state = RobotState::FORWARD;
                         } else {
                             drop_cross  = false;
                             pickup_cross = false;
