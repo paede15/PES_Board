@@ -71,6 +71,9 @@ int main()
     servo_D0.setMaxAcceleration(0.3f);
     servo_D1.setMaxAcceleration(0.3f);
 
+    const float servo_D0_home = 0.8f;
+    const float servo_D1_home = 0.6f;
+
     // servo calibration variables
     float servo_input = 0.0f;
     int servo_counter = 0;
@@ -156,7 +159,7 @@ int main()
         { 0.5f, 0.8f, 0.2f },         // YELLOW
         {-0.5f, 0.8f, 0.2f },         // GREEN
         {},                            // CYAN
-        {-0.2f, 1.0f, 0.05f},         // BLUE
+        {-1.0f, 0.90f, 0.05f},         // BLUE
         {},                            // MAGENTA
     };
     const ParcelParams drop_params[9] = {
@@ -184,10 +187,10 @@ int main()
                     cross_bar_count = 0;
                     if (!servo_D0.isEnabled()) servo_D0.enable();
                     if (!servo_D1.isEnabled()) servo_D1.enable();
-                    servo_D0.setPulseWidth(0.8f);
-                    servo_D1.setPulseWidth(0.6f);
-                    if (fabsf(servo_D0.getPulseWidth() - 0.8f) < 0.02f &&
-                        fabsf(servo_D1.getPulseWidth() - 0.6f) < 0.02f) {
+                    servo_D0.setPulseWidth(servo_D0_home);
+                    servo_D1.setPulseWidth(servo_D1_home);
+                    if (fabsf(servo_D0.getPulseWidth() - servo_D0_home) < 0.02f &&
+                        fabsf(servo_D1.getPulseWidth() - servo_D1_home) < 0.02f) {
                         robot_state = (pickups_done >= 4) ? RobotState::SLEEP : RobotState::FORWARD;
                     }
                     break;
@@ -199,19 +202,14 @@ int main()
                 case RobotState::FORWARD: {
                     if (sensor_bar.isAnyLedActive()) {
                         uint8_t raw = sensor_bar.getRaw();
-                        if ((raw & 0xc7) == 0xc7) {
-                            angle = 0.0f; // both outer LEDs active → perpendicular entry line
-                        } else {
-                            //angle = angle_filter.apply(sensor_bar.getAvgAngleRad());
-                            angle = sensor_bar.getAvgAngleRad();
-                        }
+                        angle = sensor_bar.getAvgAngleRad();
                         if ((pickup_cross || drop_cross) && !color_detected) {
                             prev_error = 0.0f;
                             robot_state = RobotState::COLOR_SCAN;
                             break;
                         }
                     } else {
-                        angle = default_turning_angle; // no line read -> positive rotation
+                        angle = (cross_bar_count == 0 || prev_error >= 0.0f) ? default_turning_angle : -default_turning_angle;
                     }
 
                     // PD controller for rotational velocity
@@ -225,7 +223,7 @@ int main()
 
                     //if (Kd * derivative < derivative_threshold) {
                     //    omega *= derivative_correction_factor;
-                    //    printf("omega: %f, angle: %f, Kd, %f, derivative %f\n", omega, angle, Kd, derivative);
+                    //    //printf("omega: %f, angle: %f, Kd, %f, derivative %f\n", omega, angle, Kd, derivative);
                     //}
 
 
@@ -262,15 +260,15 @@ int main()
                             color_detected = true;
                             //printf("Color: %s\n", ColorSensor::getColorString(current_color_run));
                             is_pickup   = true;
-                            //robot_state = RobotState::HANDLE_PARCEL;
-                            robot_state = RobotState::FORWARD;
+                            robot_state = RobotState::HANDLE_PARCEL;
+                            //robot_state = RobotState::FORWARD;
                         } else if (current_color_run == detected){
                             // already picked — this is the drop-off spot
                             drop_cross  = false;
                             pickup_cross = false;
                             is_pickup   = false;
-                            //robot_state = RobotState::HANDLE_PARCEL;
-                            robot_state = RobotState::FORWARD;
+                            robot_state = RobotState::HANDLE_PARCEL;
+                            //robot_state = RobotState::FORWARD;
                         } else {
                             drop_cross  = false;
                             pickup_cross = false;
@@ -284,48 +282,60 @@ int main()
                     motor_M2.setVelocity(0.0f);
                     user_led = 1;
 
-                    static enum class HandleStep { MOVE_OUT, MOVE_BACK } step = HandleStep::MOVE_OUT;
-                    static float m3_target   = 0.0f;
-                    static bool  move_issued = false;
+                    static enum class HandleStep {
+                        MOVE_OUT_SRV1,  // 1. move servo D1 (gripper)
+                        MOVE_OUT_SRV0,  // 2. move servo D0 (arm)
+                        MOVE_OUT_M3,    // 3. extend crane
+                        MOVE_BACK_M3,   // 4. retract crane
+                        MOVE_BACK_SRVS, // 5. return both servos
+                    } step = HandleStep::MOVE_OUT_SRV1;
+                    static float m3_target = 0.0f;
 
                     const ParcelParams& p = is_pickup ? pickup_params[current_color_run]
                                                       : drop_params[current_color_run];
 
                     switch (step) {
-                        case HandleStep::MOVE_OUT: {
-                            if (!move_issued) {
-                                move_issued = true;
-                                m3_target   = motor_M3.getRotation() + p.m3_offset;
-                                if (!servo_D0.isEnabled()) servo_D0.enable();
-                                if (!servo_D1.isEnabled()) servo_D1.enable();
-                                servo_D0.setPulseWidth(p.srv_out_d0);
-                                servo_D1.setPulseWidth(p.srv_out_d1);
-                                motor_M3.setRotation(m3_target);
-                            }
-                            if (fabsf(motor_M3.getRotation() - m3_target) < 0.05f &&
-                                fabsf(servo_D0.getPulseWidth() - p.srv_out_d0) < 0.02f &&
-                                fabsf(servo_D1.getPulseWidth() - p.srv_out_d1) < 0.02f) {
-                                step        = HandleStep::MOVE_BACK;
-                                move_issued = false;
+                        case HandleStep::MOVE_OUT_SRV1: {
+                            if (!servo_D1.isEnabled()) servo_D1.enable();
+                            servo_D1.setPulseWidth(p.srv_out_d1);
+                            if (fabsf(servo_D1.getPulseWidth() - p.srv_out_d1) < 0.02f)
+                                step = HandleStep::MOVE_OUT_SRV0;
+                            break;
+                        }
+                        case HandleStep::MOVE_OUT_SRV0: {
+                            if (!servo_D0.isEnabled()) servo_D0.enable();
+                            servo_D0.setPulseWidth(p.srv_out_d0);
+                            if (fabsf(servo_D0.getPulseWidth() - p.srv_out_d0) < 0.02f) {
+                                m3_target = motor_M3.getRotation() + p.m3_offset;
+                                step = HandleStep::MOVE_OUT_M3;
                             }
                             break;
                         }
-                        case HandleStep::MOVE_BACK: {
-                            if (!move_issued) {
-                                move_issued = true;
-                                m3_target   = motor_M3.getRotation() - p.m3_offset;
-                                servo_D0.setPulseWidth(0.8f);
-                                servo_D1.setPulseWidth(0.6f);
-                                motor_M3.setRotation(m3_target);
+                        case HandleStep::MOVE_OUT_M3: {
+                            motor_M3.setRotation(m3_target);
+                            if (fabsf(motor_M3.getRotation() - m3_target) < 0.05f) {
+                                m3_target = motor_M3.getRotation() - p.m3_offset;
+                                step = HandleStep::MOVE_BACK_M3;
                             }
-                            if (fabsf(motor_M3.getRotation() - m3_target) < 0.05f &&
-                                fabsf(servo_D0.getPulseWidth() - 0.8f) < 0.02f &&
-                                fabsf(servo_D1.getPulseWidth() - 0.6f) < 0.02f) {
-                                step             = HandleStep::MOVE_OUT;
-                                move_issued      = false;
+                            break;
+                        }
+                        case HandleStep::MOVE_BACK_M3: {
+                            motor_M3.setRotation(m3_target);
+                            if (fabsf(motor_M3.getRotation() - m3_target) < 0.05f)
+                                step = HandleStep::MOVE_BACK_SRVS;
+                            break;
+                        }
+                        case HandleStep::MOVE_BACK_SRVS: {
+                            servo_D0.setPulseWidth(servo_D0_home);
+                            servo_D1.setPulseWidth(servo_D1_home);
+                            if (fabsf(servo_D0.getPulseWidth() - servo_D0_home) < 0.02f &&
+                                fabsf(servo_D1.getPulseWidth() - servo_D1_home) < 0.02f) {
+                                step             = HandleStep::MOVE_OUT_SRV1;
                                 pickup_cross     = false;
                                 drop_cross       = false;
-                                cross_lock_ticks = 125;
+         
+
+                       cross_lock_ticks = 125;
                                 pickups_done++;
                                 if (!is_pickup) current_color_run = 0;
                                 robot_state = RobotState::INITIAL;
