@@ -50,7 +50,7 @@ int main()
 
     DigitalOut enable_motors(PB_ENABLE_DCMOTORS); // create object to enable power electronics for the dc motors
     
-    const float voltage_max = 11.0f; // maximum voltage of battery packs, adjust this to - 6.0f V if you only use one battery pack
+    const float voltage_max = 12.0f; // maximum voltage of battery packs, adjust this to - 6.0f V if you only use one battery pack
     const float gear_ratio = 100.00f;
     const float kn = 140.0f / 12.0f;
 
@@ -101,7 +101,7 @@ int main()
     const float default_turning_angle(1.0f); // this is the default trurning angle if the linereader read nothing.
 
     // rotational velocity controller (PD)
-    const float Kp{9.5f};
+    const float Kp{12.5f};
     const float Kd{0.25f};
     const float dt = main_task_period_ms * 1e-3f; // 0.020 s
     float prev_error{0.0f};
@@ -155,22 +155,22 @@ int main()
         {},                            // UNKNOWN
         {},                            // BLACK
         {},                            // WHITE
-        { 0.5f, 0.8f, 0.2f },         // RED
-        { 0.5f, 0.8f, 0.2f },         // YELLOW
-        {-0.5f, 0.8f, 0.2f },         // GREEN
+        {1.75f, 0.95f, 0.15f },         // RED down right
+        {1.75f, 0.95f, 0.2f },         // YELLOW up right
+        {-0.55f, 0.85f, 0.1f },         // GREEN down left
         {},                            // CYAN
-        {-1.0f, 0.90f, 0.05f},         // BLUE
+        {-0.55f, 1.0f, 0.15f},         // BLUE up left
         {},                            // MAGENTA
     };
     const ParcelParams drop_params[9] = {
         {},
         {},
         {},
-        { 0.5f, 0.8f, 0.2f },         // RED
-        { 0.5f, 0.8f, 0.2f },         // YELLOW
-        {-0.5f, 0.8f, 0.2f },         // GREEN
+        { 1.75f, 0.95f, 0.1f },         // RED
+        { 1.75f, 0.9f, 0.2f },         // YELLOW
+        {-0.55f, 0.85f, 0.1f },         // GREEN
         {},
-        {-0.5f, 1.0f, 0.1f },         // BLUE
+        {-0.6f, 1.1f, 0.17f },         // BLUE
         {},
     };
 
@@ -202,14 +202,29 @@ int main()
                 case RobotState::FORWARD: {
                     if (sensor_bar.isAnyLedActive()) {
                         uint8_t raw = sensor_bar.getRaw();
-                        angle = sensor_bar.getAvgAngleRad();
+                        
+                        int active_leds = 0;
+                        for (int i = 0; i < 8; i++) {
+                            if (raw & (1 << i)) {
+                                active_leds++;
+                            }
+                        }
+                        if (is_pickup == false && active_leds >= 4){
+                            angle = -0.15f;
+                        }
+                        
+                        else {
+                            angle = sensor_bar.getAvgAngleRad();
+                        }
+                        
                         if ((pickup_cross || drop_cross) && !color_detected) {
                             prev_error = 0.0f;
                             robot_state = RobotState::COLOR_SCAN;
                             break;
                         }
                     } else {
-                        angle = (cross_bar_count == 0 || prev_error >= 0.0f) ? default_turning_angle : -default_turning_angle;
+                        //angle = 0.0f; //wenn nichts geradeaus        
+                        angle = default_turning_angle; // no line read -> positive rotation
                     }
 
                     // PD controller for rotational velocity
